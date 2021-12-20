@@ -4,6 +4,7 @@ use crate::{utils::HexSlice, BlockDevice, Error, Read};
 use bitflags::bitflags;
 use core::convert::TryInto;
 use core::fmt;
+
 use embedded_hal::blocking::spi::Transfer;
 use embedded_hal::digital::v2::OutputPin;
 
@@ -89,19 +90,22 @@ enum Opcode {
     SectorErase = 0x20,
     BlockErase = 0xD8,
     ChipErase = 0xC7,
+    EnableReset = 0x66,
+    ResetDevice = 0x99,
+    FastRead = 0x0B,
 }
 
 bitflags! {
     /// Status register bits.
     pub struct Status: u8 {
         /// Erase or write in progress.
-        const BUSY = 1 << 0;
+        const BUSY = 0b00000001;
         /// Status of the **W**rite **E**nable **L**atch.
-        const WEL = 1 << 1;
+        const WEL  = 0b00000010;
         /// The 3 protection region bits.
         const PROT = 0b00011100;
         /// **S**tatus **R**egister **W**rite **D**isable bit.
-        const SRWD = 1 << 7;
+        const SRWD = 0b10000000;
     }
 }
 
@@ -113,12 +117,18 @@ bitflags! {
 /// * **`CS`**: The **C**hip-**S**elect line attached to the `\CS`/`\CE` pin of
 ///   the flash chip.
 #[derive(Debug)]
-pub struct Flash<SPI: Transfer<u8>, CS: OutputPin> {
+pub struct Flash<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> {
     spi: SPI,
     cs: CS,
+    delay_us: F,
 }
 
-impl<SPI: Transfer<u8>, CS: OutputPin> Flash<SPI, CS> {
+impl<SPI, CS, F> Flash<SPI, CS, F>
+where
+    SPI: Transfer<u8>,
+    CS: OutputPin,
+    F: FnMut(u32),
+{
     /// Creates a new 25-series flash driver.
     ///
     /// # Parameters
@@ -127,17 +137,18 @@ impl<SPI: Transfer<u8>, CS: OutputPin> Flash<SPI, CS> {
     ///   mode for the device.
     /// * **`cs`**: The **C**hip-**S**elect Pin connected to the `\CS`/`\CE` pin
     ///   of the flash chip. Will be driven low when accessing the device.
-    pub fn init(spi: SPI, cs: CS) -> Result<Self, Error<SPI, CS>> {
-        let mut this = Self { spi, cs };
+    pub fn init(spi: SPI, cs: CS, delay_us: F) -> Result<Self, Error<SPI, CS>> {
+        let mut this = Self { spi, cs, delay_us };
+        this.reset_device()?;
         let status = this.read_status()?;
         info!("Flash::init: status = {:?}", status);
 
         // Here we don't expect any writes to be in progress, and the latch must
         // also be deasserted.
+
         if !(status & (Status::BUSY | Status::WEL)).is_empty() {
             return Err(Error::UnexpectedStatus);
         }
-
         Ok(this)
     }
 
@@ -165,24 +176,57 @@ impl<SPI: Transfer<u8>, CS: OutputPin> Flash<SPI, CS> {
     pub fn read_status(&mut self) -> Result<Status, Error<SPI, CS>> {
         let mut buf = [Opcode::ReadStatus as u8, 0];
         self.command(&mut buf)?;
-
         Ok(Status::from_bits_truncate(buf[1]))
     }
 
-    fn write_enable(&mut self) -> Result<(), Error<SPI, CS>> {
+    pub fn read_status_u8(&mut self) -> Result<u8, Error<SPI, CS>> {
+        let mut buf = [Opcode::ReadStatus as u8, 0];
+        self.command(&mut buf)?;
+        Ok(buf[1])
+    }
+
+    pub fn write_enable(&mut self) -> Result<(), Error<SPI, CS>> {
         let mut cmd_buf = [Opcode::WriteEnable as u8];
         self.command(&mut cmd_buf)?;
         Ok(())
     }
 
-    fn wait_done(&mut self) -> Result<(), Error<SPI, CS>> {
-        // TODO: Consider changing this to a delay based pattern
-        while self.read_status()?.contains(Status::BUSY) {}
+    pub fn write_disable(&mut self) -> Result<(), Error<SPI, CS>> {
+        let mut cmd_buf = [Opcode::WriteDisable as u8];
+        self.command(&mut cmd_buf)?;
         Ok(())
+    }
+
+    pub fn wait_done(&mut self) -> Result<u32, Error<SPI, CS>> {
+        // TODO: Consider changing this to a delay based pattern
+        let mut i = 0;
+        while self.read_status()?.contains(Status::BUSY) {
+            // while self.read_status_u8()? & 0x01 != 0x00 {
+            (self.delay_us)(50u32);
+            i += 1;
+        }
+        Ok(i)
+    }
+
+    pub fn reset_device(&mut self) -> Result<(), Error<SPI, CS>> {
+        let mut cmd_buf = [Opcode::EnableReset as u8];
+        self.command(&mut cmd_buf)?;
+        let mut cmd_buf = [Opcode::ResetDevice as u8];
+        self.command(&mut cmd_buf)?;
+        (self.delay_us)(50u32); // wait 50µs
+        Ok(())
+    }
+
+    pub fn wait_ms(&mut self, us: u32) {
+        (self.delay_us)(1000 * us);
+    }
+
+    pub fn wait_us(&mut self, us: u32) {
+        (self.delay_us)(us);
     }
 }
 
-impl<SPI: Transfer<u8>, CS: OutputPin> Read<u32, SPI, CS> for Flash<SPI, CS> {
+impl<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> Read<u32, SPI, CS> for Flash<SPI, CS, F> {
     /// Reads flash contents into `buf`, starting at `addr`.
     ///
     /// Note that `addr` is not fully decoded: Flash chips will typically only
@@ -197,7 +241,6 @@ impl<SPI: Transfer<u8>, CS: OutputPin> Read<u32, SPI, CS> for Flash<SPI, CS> {
     /// * `buf`: Destination buffer to fill.
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), Error<SPI, CS>> {
         // TODO what happens if `buf` is empty?
-
         let mut cmd_buf = [
             Opcode::Read as u8,
             (addr >> 16) as u8,
@@ -215,11 +258,12 @@ impl<SPI: Transfer<u8>, CS: OutputPin> Read<u32, SPI, CS> for Flash<SPI, CS> {
     }
 }
 
-impl<SPI: Transfer<u8>, CS: OutputPin> BlockDevice<u32, SPI, CS> for Flash<SPI, CS> {
-    fn erase_sectors(&mut self, addr: u32, amount: usize) -> Result<(), Error<SPI, CS>> {
+impl<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> BlockDevice<u32, SPI, CS>
+    for Flash<SPI, CS, F>
+{
+    fn erase_sectors(&mut self, addr: u32, amount: usize) -> Result<u32, Error<SPI, CS>> {
         for c in 0..amount {
             self.write_enable()?;
-
             let current_addr: u32 = (addr as usize + c * 256).try_into().unwrap();
             let mut cmd_buf = [
                 Opcode::SectorErase as u8,
@@ -228,16 +272,15 @@ impl<SPI: Transfer<u8>, CS: OutputPin> BlockDevice<u32, SPI, CS> for Flash<SPI, 
                 current_addr as u8,
             ];
             self.command(&mut cmd_buf)?;
-            self.wait_done()?;
+            (self.delay_us)(50_000); // wait 40 ms
         }
-
-        Ok(())
+        Ok(self.wait_done()?)
     }
 
-    fn write_bytes(&mut self, addr: u32, data: &mut [u8]) -> Result<(), Error<SPI, CS>> {
+    fn write_bytes(&mut self, addr: u32, data: &mut [u8]) -> Result<u32, Error<SPI, CS>> {
+        let mut wait = 0u32;
         for (c, chunk) in data.chunks_mut(256).enumerate() {
             self.write_enable()?;
-
             let current_addr: u32 = (addr as usize + c * 256).try_into().unwrap();
             let mut cmd_buf = [
                 Opcode::PageProg as u8,
@@ -253,15 +296,17 @@ impl<SPI: Transfer<u8>, CS: OutputPin> BlockDevice<u32, SPI, CS> for Flash<SPI, 
             }
             self.cs.set_high().map_err(Error::Gpio)?;
             spi_result.map(|_| ()).map_err(Error::Spi)?;
-            self.wait_done()?;
+            (self.delay_us)(200u32); // wait 100 µs
+            wait += self.wait_done()?;
         }
-        Ok(())
+        Ok(wait)
     }
 
     fn erase_all(&mut self) -> Result<(), Error<SPI, CS>> {
         self.write_enable()?;
         let mut cmd_buf = [Opcode::ChipErase as u8];
         self.command(&mut cmd_buf)?;
+        // (self.delay_us)(20_000_000);
         self.wait_done()?;
         Ok(())
     }
