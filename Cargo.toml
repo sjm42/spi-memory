@@ -43,6 +43,11 @@ replace = "https://docs.rs/spi-memory/{{version}}"
 embedded-hal = "0.2"
 log = { version = "0.4", optional = true }
 bitflags = "1.0.4"
+stm32f4xx-hal = { features = [
+    "rt",
+    "stm32f411",
+    "usb_fs",
+], git = "https://github.com/stm32-rs/stm32f4xx-hal.git" }
 
 [dev-dependencies]
 cortex-m = "0.7"

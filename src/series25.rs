@@ -5,8 +5,14 @@ use bitflags::bitflags;
 use core::convert::TryInto;
 use core::fmt;
 
+use embedded_hal::blocking::delay::{DelayMs, DelayUs};
 use embedded_hal::blocking::spi::Transfer;
 use embedded_hal::digital::v2::OutputPin;
+
+use stm32f4xx_hal as hal;
+
+use hal::delay::Delay;
+use hal::pac::TIM5;
 
 /// 3-Byte JEDEC manufacturer and device identification.
 pub struct Identification {
@@ -116,18 +122,17 @@ bitflags! {
 /// * **`SPI`**: The SPI master to which the flash chip is attached.
 /// * **`CS`**: The **C**hip-**S**elect line attached to the `\CS`/`\CE` pin of
 ///   the flash chip.
-#[derive(Debug)]
-pub struct Flash<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> {
+// #[derive(Debug)]
+pub struct Flash<SPI: Transfer<u8>, CS: OutputPin> {
     spi: SPI,
     cs: CS,
-    delay_us: F,
+    delay: Delay<TIM5>,
 }
 
-impl<SPI, CS, F> Flash<SPI, CS, F>
+impl<SPI, CS> Flash<SPI, CS>
 where
     SPI: Transfer<u8>,
     CS: OutputPin,
-    F: FnMut(u32),
 {
     /// Creates a new 25-series flash driver.
     ///
@@ -137,8 +142,8 @@ where
     ///   mode for the device.
     /// * **`cs`**: The **C**hip-**S**elect Pin connected to the `\CS`/`\CE` pin
     ///   of the flash chip. Will be driven low when accessing the device.
-    pub fn init(spi: SPI, cs: CS, delay_us: F) -> Result<Self, Error<SPI, CS>> {
-        let mut this = Self { spi, cs, delay_us };
+    pub fn init(spi: SPI, cs: CS, delay: Delay<TIM5>) -> Result<Self, Error<SPI, CS>> {
+        let mut this = Self { spi, cs, delay };
         this.reset_device()?;
         let status = this.read_status()?;
         info!("Flash::init: status = {:?}", status);
@@ -202,7 +207,7 @@ where
         let mut i = 0;
         while self.read_status()?.contains(Status::BUSY) {
             // while self.read_status_u8()? & 0x01 != 0x00 {
-            (self.delay_us)(50u32);
+            self.wait_us(50u32);
             i += 1;
         }
         Ok(i)
@@ -213,20 +218,20 @@ where
         self.command(&mut cmd_buf)?;
         let mut cmd_buf = [Opcode::ResetDevice as u8];
         self.command(&mut cmd_buf)?;
-        (self.delay_us)(50u32); // wait 50µs
+        self.wait_us(50u32); // wait 50µs
         Ok(())
     }
 
-    pub fn wait_ms(&mut self, us: u32) {
-        (self.delay_us)(1000 * us);
+    pub fn wait_ms(&mut self, ms: u32) {
+        self.delay.delay_ms(ms);
     }
 
     pub fn wait_us(&mut self, us: u32) {
-        (self.delay_us)(us);
+        self.delay.delay_us(us);
     }
 }
 
-impl<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> Read<u32, SPI, CS> for Flash<SPI, CS, F> {
+impl<SPI: Transfer<u8>, CS: OutputPin> Read<u32, SPI, CS> for Flash<SPI, CS> {
     /// Reads flash contents into `buf`, starting at `addr`.
     ///
     /// Note that `addr` is not fully decoded: Flash chips will typically only
@@ -258,9 +263,7 @@ impl<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> Read<u32, SPI, CS> for Fla
     }
 }
 
-impl<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> BlockDevice<u32, SPI, CS>
-    for Flash<SPI, CS, F>
-{
+impl<SPI: Transfer<u8>, CS: OutputPin> BlockDevice<u32, SPI, CS> for Flash<SPI, CS> {
     fn erase_sectors(&mut self, addr: u32, amount: usize) -> Result<u32, Error<SPI, CS>> {
         for c in 0..amount {
             self.write_enable()?;
@@ -272,7 +275,7 @@ impl<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> BlockDevice<u32, SPI, CS>
                 current_addr as u8,
             ];
             self.command(&mut cmd_buf)?;
-            (self.delay_us)(50_000); // wait 40 ms
+            self.wait_ms(40);
         }
         Ok(self.wait_done()?)
     }
@@ -296,7 +299,7 @@ impl<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> BlockDevice<u32, SPI, CS>
             }
             self.cs.set_high().map_err(Error::Gpio)?;
             spi_result.map(|_| ()).map_err(Error::Spi)?;
-            (self.delay_us)(200u32); // wait 100 µs
+            self.wait_us(200);
             wait += self.wait_done()?;
         }
         Ok(wait)
@@ -306,7 +309,7 @@ impl<SPI: Transfer<u8>, CS: OutputPin, F: FnMut(u32)> BlockDevice<u32, SPI, CS>
         self.write_enable()?;
         let mut cmd_buf = [Opcode::ChipErase as u8];
         self.command(&mut cmd_buf)?;
-        // (self.delay_us)(20_000_000);
+        self.wait_ms(20_000);
         self.wait_done()?;
         Ok(())
     }
