@@ -11,8 +11,8 @@ use embedded_hal::digital::v2::OutputPin;
 
 use stm32f4xx_hal as hal;
 
-use hal::delay::Delay;
 use hal::pac::TIM5;
+use hal::timer::Delay;
 
 /// 3-Byte JEDEC manufacturer and device identification.
 pub struct Identification {
@@ -126,7 +126,7 @@ bitflags! {
 pub struct Flash<SPI: Transfer<u8>, CS: OutputPin> {
     spi: SPI,
     cs: CS,
-    delay: Delay<TIM5>,
+    delay: Delay<TIM5, 1_000_000>,
 }
 
 impl<SPI, CS> Flash<SPI, CS>
@@ -142,7 +142,7 @@ where
     ///   mode for the device.
     /// * **`cs`**: The **C**hip-**S**elect Pin connected to the `\CS`/`\CE` pin
     ///   of the flash chip. Will be driven low when accessing the device.
-    pub fn init(spi: SPI, cs: CS, delay: Delay<TIM5>) -> Result<Self, Error<SPI, CS>> {
+    pub fn init(spi: SPI, cs: CS, delay: Delay<TIM5, 1_000_000>) -> Result<Self, Error<SPI, CS>> {
         let mut this = Self { spi, cs, delay };
         this.reset_device()?;
         let status = this.read_status()?;
