@@ -1,6 +1,6 @@
 [package]
 name = "spi-memory"
-version = "0.2.1"
+version = "0.2.2"
 authors = [
   "Jonas Schievink <jonasschievink@gmail.com>",
   "Henrik Böving <hargonix@gmail.com>",
@@ -43,7 +43,7 @@ replace = "https://docs.rs/spi-memory/{{version}}"
 embedded-hal = "0.2"
 log = { version = "0.4", optional = true }
 bitflags = "1.3"
-stm32f4xx-hal = { features = ["rt", "stm32f411", "usb_fs"], version = "0.13" }
+stm32f4xx-hal = { features = ["rt", "stm32f411", "usb_fs"], version = "0.14" }
 
 [dev-dependencies]
 cortex-m = "0.7"
